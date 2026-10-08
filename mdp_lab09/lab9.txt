@@ -1,0 +1,86 @@
+CREATE KEYSPACE npc WITH replication = 
+{'class': 'SimpleStrategy', 'replication_factor': 3};
+
+DESCRIBE keyspaces;
+
+USE npc;
+
+
+
+CREATE TABLE npc_prueba (username text PRIMARY KEY, age int);
+
+DESCRIBE tables;
+
+ALTER TABLE npc_prueba ADD awake boolean;
+
+DROP TABLE npc_prueba;
+
+DROP KEYSPACE npc;
+
+USE cc5212;
+
+DESCRIBE tables;
+
+DESCRIBE TABLE students;
+
+SELECT * FROM students;
+
+INSERT INTO students (username, name) VALUES ('npc', 'J. Chen');
+
+SELECT * FROM students;
+
+
+DELETE name FROM students WHERE username = 'npc';
+
+DELETE FROM students WHERE username = 'npc';
+
+INSERT INTO students (username, name) VALUES ('npc', 'Jiale Chen');
+
+INSERT INTO students(username, age) VALUES ('npc', 23);
+
+INSERT INTO students(username, awake) VALUES ('npc', false);
+
+INSERT INTO students(username, group) VALUES ('npc', 'bot');
+
+INSERT INTO students(username, hobbies) VALUES ('npc', {'dormir', 'disociar'});
+
+INSERT INTO students(username, message) VALUES ('npc', 'some magic from magixx');
+
+SELECT COUNT(*) AS scount FROM students;
+
+SELECT name FROM students WHERE username = 'npc';
+
+
+COPY students (username, name, age, group, hobbies, awake, message) TO '/data/2026/uhadoop/npc/npc-students.csv';
+
+CREATE TABLE npc (username text PRIMARY KEY, name text, age int, group text, hobbies set<text>, awake boolean, message text);
+
+COPY npc (username, name, age, group, hobbies, awake, message) FROM '/data/2026/uhadoop/npc/npc-students.csv';
+
+CREATE INDEX npc_age_idx ON npc (age);
+
+SELECT name FROM npc WHERE age = 23;
+
+CREATE INDEX npc_group_idx ON npc (group);
+
+SELECT name FROM npc WHERE group = 'profe';
+
+CREATE INDEX npc_awake_idx ON npc (awake);
+
+SELECT name FROM npc WHERE age > 24 AND awake = true ALLOW FILTERING;
+
+CREATE TABLE npc_por_grupo (username text, name text, age int, group text, hobbies set<text>, awake boolean, message text, PRIMARY KEY (group, username));
+
+COPY npc_por_grupo (username, name, age, group, hobbies, awake, message)FROM '/data/2026/uhadoop/npc/npc-students.csv';
+
+SELECT age FROM npc_por_grupo WHERE group = 'profe' AND username = 'amoya';
+
+CREATE TABLE npc_por_grupo_edad (username text, name text, age int, group text, hobbies set<text>, awake boolean, message text, PRIMARY KEY (group, age, username));
+
+COPY npc_por_grupo_edad (username, name, age, group, hobbies, awake, message) FROM '/data/2026/uhadoop/npc/npc-students.csv';
+
+SELECT name FROM npc_por_grupo_edad WHERE group = 'profe';
+
+SELECT name FROM npc_por_grupo_edad WHERE group = 'profe' AND age > 20;
+
+SELECT name FROM npc_por_grupo_edad WHERE group = 'profe' AND username = 'amoya' AND age = 37;
