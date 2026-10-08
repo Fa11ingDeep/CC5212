@@ -1,0 +1,10 @@
+http://es.wikipedia.org/wiki/Estados_Unidos	0.004197702458698532
+http://es.wikipedia.org/wiki/España	0.0032348949362214227
+http://es.wikipedia.org/wiki/Francia	0.002151692480973186
+http://es.wikipedia.org/wiki/Animalia	0.001629879876207243
+http://es.wikipedia.org/wiki/2008	0.0015809003348162785
+http://es.wikipedia.org/wiki/Raza_(censo_de_los_Estados_Unidos)	0.0015421224962108451
+http://es.wikipedia.org/wiki/Argentina	0.0014587384921396405
+http://es.wikipedia.org/wiki/Kilómetro_cuadrado	0.0014471436887035154
+http://es.wikipedia.org/wiki/México	0.001435695418170523
+http://es.wikipedia.org/wiki/Alemania	0.0014204080907101616

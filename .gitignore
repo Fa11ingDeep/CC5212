@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Datasets
+**/data/
+**/datasets/
+*.csv
+*.tsv
+*.csv.gz
+*.tsv.gz
+es-wiki-*.txt
+es-wiki-*.txt.gz

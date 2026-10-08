@@ -1,0 +1,3 @@
+Burst 1 started at 1505812950000 with value "2017-09-19 06:22:30	2017-09-19 06:22:29	910026289993490433	1485891960	TWEET	en	I JUST FELT MY FIRST EARTHQUAKE AND I DID NOT CARE FOR IT	0"
+Burst 1 ended at 1505813771000 with value "2017-09-19 06:36:11	2017-09-19 06:23:56	910026656131067904	362655140	RT_ROOT	en	dam that was a big fuckin earthquake i guess god found out about the gay bible	209"
+Burst 2 started at 1505855920000 with value "2017-09-19 18:18:40	2017-09-19 18:18:32	910206491008946176	38711366	RT_ROOT	es	Madres que otro puto temblor.	1"
