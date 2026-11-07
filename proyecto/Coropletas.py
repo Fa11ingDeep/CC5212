@@ -3,7 +3,7 @@ from __future__ import print_function
 import math
 import sys
 
-from pyspark.sql import SparkSession, Window
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 # Datasets para coropletas hexagonales sobre Chicago.
@@ -17,12 +17,13 @@ from pyspark.sql import functions as F
 # Todo se hace con funciones nativas de Spark (sin UDF de Python).
 #
 # Salidas (CSV con encabezado, una carpeta por dataset dentro de <dirout>):
-#   coropletas_total_clas           {unique_key, n_pleta, freq}
-#   coropletas_secuencia_clas       {unique_key, date, n_pleta, freq}
-#   coropletas_secuencia_tipo_clas  {unique_key, date, primary_type, n_pleta, freq}
+#   coropletas_total_clas           {n_pleta, freq}
+#   coropletas_secuencia_clas       {date, n_pleta, freq}
+#   coropletas_secuencia_tipo_clas  {date, primary_type, n_pleta, freq}
 #
 # date = "YYYY-MM" (mensual, igual que PropMensual.py).
-# freq = cantidad de crimenes de la celda (en esa fecha / fecha y tipo).
+# Una fila por grupo: freq = cantidad de crimenes de la celda
+# (en toda la historia / en esa fecha / en esa fecha y tipo).
 
 # Centro de referencia de la proyeccion y caja que contiene Chicago
 # (descarta coordenadas nulas o erroneas, p. ej. lat 36.6).
@@ -56,14 +57,20 @@ def hex_axial(lat, lon, hex_m):
     return q.cast("int"), r.cast("int")
 
 
-def con_freq(df, claves):
-    """Agrega freq = cantidad de filas que comparten las columnas `claves`."""
-    return df.withColumn("freq", F.count(F.lit(1)).over(Window.partitionBy(*claves)))
+def contar(*claves):
+    """Para DataFrame.transform: una fila por combinacion de `claves`,
+    con freq = cantidad de crimenes."""
+    return lambda df: df.groupBy(*claves).agg(F.count(F.lit(1)).alias("freq"))
 
 
-def escribir(df, dirout, nombre):
-    # escape '"' = CSV estandar (lo que esperan pandas, QGIS, etc.).
-    df.write.option("header", "true").option("escape", '"').csv(dirout.rstrip("/") + "/" + nombre)
+def un_archivo(df):
+    """Para DataFrame.transform: las salidas agregadas son pequenas (<= ~65 MB),
+    asi que se escribe un solo CSV por dataset, con un unico encabezado."""
+    return df.coalesce(1)
+
+
+# escape '"' = CSV estandar (pandas, QGIS, etc.).
+CSV = {"header": "true", "escape": '"'}
 
 
 if __name__ == "__main__":
@@ -83,7 +90,6 @@ if __name__ == "__main__":
     lat = F.col("latitude").cast("double")
     lon = F.col("longitude").cast("double")
     base = raw.select(
-            F.col("id").alias("unique_key"),
             F.substring(F.col("date"), 1, 7).alias("date"),
             F.trim(F.col("primary_type")).alias("primary_type"),
             lat.alias("latitude"),
@@ -96,18 +102,18 @@ if __name__ == "__main__":
     q, r = hex_axial(F.col("latitude"), F.col("longitude"), hex_m)
     base = base.withColumn("n_pleta", F.concat_ws("_", q, r)).cache()
 
+    salida = lambda nombre: dirout.rstrip("/") + "/" + nombre
+
     # Totales (toda la historia).
-    escribir(con_freq(base.select("unique_key", "n_pleta"), ["n_pleta"]),
-             dirout, "coropletas_total_clas")
+    base.transform(contar("n_pleta")).transform(un_archivo) \
+        .write.options(**CSV).csv(salida("coropletas_total_clas"))
 
     # Secuencia mensual.
-    escribir(con_freq(base.select("unique_key", "date", "n_pleta"),
-                      ["date", "n_pleta"]),
-             dirout, "coropletas_secuencia_clas")
+    base.transform(contar("date", "n_pleta")).transform(un_archivo) \
+        .write.options(**CSV).csv(salida("coropletas_secuencia_clas"))
 
     # Secuencia mensual por tipo de crimen.
-    escribir(con_freq(base.select("unique_key", "date", "primary_type", "n_pleta"),
-                      ["date", "primary_type", "n_pleta"]),
-             dirout, "coropletas_secuencia_tipo_clas")
+    base.transform(contar("date", "primary_type", "n_pleta")).transform(un_archivo) \
+        .write.options(**CSV).csv(salida("coropletas_secuencia_tipo_clas"))
 
     spark.stop()
