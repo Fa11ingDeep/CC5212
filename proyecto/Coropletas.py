@@ -1,77 +1,36 @@
 from __future__ import print_function
 
 import math
+import os
 import sys
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
-# Datasets para coropletas hexagonales sobre Chicago.
+# Datasets para coropletas hexagonales sobre Chicago, calculados solo con Spark
+# (sin h3 ni APIs externas).
 #
-# La grilla hexagonal se calcula aqui mismo (sin h3 ni APIs externas):
-#   1. (lat, lon) se proyecta a metros con una proyeccion equirectangular
-#      local centrada en Chicago (error despreciable a escala de ciudad).
-#   2. (x, y) se convierte a coordenadas axiales (q, r) de un hexagono
-#      "pointy-top" de radio HEX_M metros y se redondea con cube rounding.
-#   3. n_pleta = "q_r" identifica la celda.
-# Todo se hace con funciones nativas de Spark (sin UDF de Python).
+# Salidas (un CSV con encabezado por carpeta, dentro de <dirout>):
+#   coropletas_total_clas           {n_pleta, freq, nivel, vmin, q3, vmax}
+#   coropletas_secuencia_clas       {date, n_pleta, freq, nivel, vmin, q3, vmax}
+#   coropletas_secuencia_tipo_clas  {date, primary_type, n_pleta, freq, nivel, vmin, q3, vmax}
 #
-# Salidas (CSV con encabezado, una carpeta por dataset dentro de <dirout>):
-#   coropletas_total_clas           {n_pleta, freq}
-#   coropletas_secuencia_clas       {date, n_pleta, freq}
-#   coropletas_secuencia_tipo_clas  {date, primary_type, n_pleta, freq}
-#
-# date = "YYYY-MM" (mensual, igual que PropMensual.py).
-# Una fila por grupo: freq = cantidad de crimenes de la celda
-# (en toda la historia / en esa fecha / en esa fecha y tipo).
+# n_pleta = "q_r", celda hexagonal de radio hex_m metros.
+# date    = "YYYY-MM".
+# freq    = crimenes de la celda (en toda la historia / ese mes / ese mes y tipo).
+# vmin, q3, vmax = minimo, tercer cuartil y maximo de freq en todo el dataset
+#                  (en el de tipos, por tipo): la escala es fija entre meses.
+# nivel   = color en escala log: 0 = vmin (azul, seguro), 0.5 = q3, 1 = vmax (rojo,
+#           peligroso). Si q3 == vmin no hay mitad azul y esos valores quedan en 0.5.
 
-# Centro de referencia de la proyeccion y caja que contiene Chicago
-# (descarta coordenadas nulas o erroneas, p. ej. lat 36.6).
-LAT0 = 41.84
-LON0 = -87.68
+# Proyeccion local centrada en Chicago (VisualizarCoropletas.py usa la misma) y caja
+# que descarta coordenadas nulas o erroneas (p. ej. lat 36.6).
+LAT0, LON0 = 41.84, -87.68
 LAT_MIN, LAT_MAX = 41.60, 42.05
 LON_MIN, LON_MAX = -87.95, -87.50
-
-R_TIERRA = 6371008.8
-SQRT3 = math.sqrt(3.0)
-M_POR_GRADO_LAT = R_TIERRA * math.pi / 180.0
+M_POR_GRADO_LAT = 6371008.8 * math.pi / 180.0
 M_POR_GRADO_LON = M_POR_GRADO_LAT * math.cos(math.radians(LAT0))
-
-
-def hex_axial(lat, lon, hex_m):
-    """Columnas (q, r) enteras de la celda hexagonal que contiene (lat, lon)."""
-    x = (lon - LON0) * M_POR_GRADO_LON
-    y = (lat - LAT0) * M_POR_GRADO_LAT
-    qf = (SQRT3 / 3.0 * x - 1.0 / 3.0 * y) / hex_m
-    rf = (2.0 / 3.0 * y) / hex_m
-    sf = -qf - rf
-
-    qr, rr, sr = F.round(qf), F.round(rf), F.round(sf)
-    dq, dr, ds = F.abs(qr - qf), F.abs(rr - rf), F.abs(sr - sf)
-
-    # Cube rounding: se corrige la coordenada con mayor error de redondeo.
-    q = F.when((dq > dr) & (dq > ds), -rr - sr).otherwise(qr)
-    r = F.when((dq > dr) & (dq > ds), rr) \
-         .when(dr > ds, -qr - sr) \
-         .otherwise(rr)
-    return q.cast("int"), r.cast("int")
-
-
-def contar(*claves):
-    """Para DataFrame.transform: una fila por combinacion de `claves`,
-    con freq = cantidad de crimenes."""
-    return lambda df: df.groupBy(*claves).agg(F.count(F.lit(1)).alias("freq"))
-
-
-def un_archivo(df):
-    """Para DataFrame.transform: las salidas agregadas son pequenas (<= ~65 MB),
-    asi que se escribe un solo CSV por dataset, con un unico encabezado."""
-    return df.coalesce(1)
-
-
-# escape '"' = CSV estandar (pandas, QGIS, etc.).
-CSV = {"header": "true", "escape": '"'}
-
+SQRT3 = math.sqrt(3.0)
 
 if __name__ == "__main__":
     if len(sys.argv) not in (3, 4):
@@ -84,36 +43,51 @@ if __name__ == "__main__":
 
     spark = SparkSession.builder.appName("Coropletas").getOrCreate()
 
-    raw = spark.read.parquet(filein)
-
-    # Base georreferenciada: un registro por crimen con fecha y celda.
-    lat = F.col("latitude").cast("double")
-    lon = F.col("longitude").cast("double")
-    base = raw.select(
-            F.substring(F.col("date"), 1, 7).alias("date"),
-            F.trim(F.col("primary_type")).alias("primary_type"),
-            lat.alias("latitude"),
-            lon.alias("longitude")) \
-        .where(F.col("latitude").between(LAT_MIN, LAT_MAX)
-               & F.col("longitude").between(LON_MIN, LON_MAX)
+    crimenes = spark.read.parquet(filein).select(
+            F.substring("date", 1, 7).alias("date"),
+            F.trim("primary_type").alias("primary_type"),
+            F.col("latitude").cast("double").alias("lat"),
+            F.col("longitude").cast("double").alias("lon")) \
+        .where(F.col("lat").between(LAT_MIN, LAT_MAX)
+               & F.col("lon").between(LON_MIN, LON_MAX)
                & (F.length("date") == 7)
-               & F.col("primary_type").isNotNull() & (F.col("primary_type") != ""))
+               & (F.col("primary_type") != ""))
 
-    q, r = hex_axial(F.col("latitude"), F.col("longitude"), hex_m)
-    base = base.withColumn("n_pleta", F.concat_ws("_", q, r)).cache()
+    # Celda hexagonal (pointy-top): (lat, lon) -> metros -> coordenadas axiales
+    # fraccionarias (qf, rf, sf), redondeadas con "cube rounding" (se corrige la
+    # coordenada con mayor error de redondeo para que q + r + s = 0).
+    x = (F.col("lon") - LON0) * M_POR_GRADO_LON
+    y = (F.col("lat") - LAT0) * M_POR_GRADO_LAT
+    qf = (SQRT3 / 3 * x - y / 3) / hex_m
+    rf = (2.0 / 3 * y) / hex_m
+    sf = -qf - rf
+    q, r, s = F.round(qf), F.round(rf), F.round(sf)
+    dq, dr, ds = F.abs(q - qf), F.abs(r - rf), F.abs(s - sf)
+    q = F.when((dq > dr) & (dq > ds), -r - s).otherwise(q)
+    r = F.when((dq > dr) & (dq > ds), r).when(dr > ds, -q - s).otherwise(r)
+    crimenes = crimenes.withColumn("n_pleta", F.concat_ws("_", q.cast("int"), r.cast("int"))) \
+        .cache()
 
-    salida = lambda nombre: dirout.rstrip("/") + "/" + nombre
+    # (carpeta de salida, columnas que definen cada fila, grupo con escala propia)
+    salidas = [
+        ("coropletas_total_clas", ["n_pleta"], []),
+        ("coropletas_secuencia_clas", ["date", "n_pleta"], []),
+        ("coropletas_secuencia_tipo_clas", ["date", "primary_type", "n_pleta"], ["primary_type"]),
+    ]
+    for nombre, claves, grupo in salidas:
+        escala = Window.partitionBy(*grupo)
+        conteo = crimenes.groupBy(*claves).agg(F.count("*").alias("freq")) \
+            .withColumn("vmin", F.min("freq").over(escala)) \
+            .withColumn("q3", F.expr("percentile(freq, 0.75)").over(escala)) \
+            .withColumn("vmax", F.max("freq").over(escala))
 
-    # Totales (toda la historia).
-    base.transform(contar("n_pleta")).transform(un_archivo) \
-        .write.options(**CSV).csv(salida("coropletas_total_clas"))
+        l, lmin, lq3, lmax = F.log10("freq"), F.log10("vmin"), F.log10("q3"), F.log10("vmax")
+        nivel = F.when(F.col("freq") > F.col("q3"), 0.5 + 0.5 * (l - lq3) / (lmax - lq3)) \
+                 .when(F.col("q3") > F.col("vmin"), 0.5 * (l - lmin) / (lq3 - lmin)) \
+                 .otherwise(0.5)
 
-    # Secuencia mensual.
-    base.transform(contar("date", "n_pleta")).transform(un_archivo) \
-        .write.options(**CSV).csv(salida("coropletas_secuencia_clas"))
-
-    # Secuencia mensual por tipo de crimen.
-    base.transform(contar("date", "primary_type", "n_pleta")).transform(un_archivo) \
-        .write.options(**CSV).csv(salida("coropletas_secuencia_tipo_clas"))
+        # Las salidas son pequenas: coalesce(1) deja un solo CSV con un solo encabezado.
+        conteo.select(claves + ["freq", F.round(nivel, 4).alias("nivel"), "vmin", "q3", "vmax"]) \
+            .coalesce(1).write.option("header", True).csv(os.path.join(dirout, nombre))
 
     spark.stop()
