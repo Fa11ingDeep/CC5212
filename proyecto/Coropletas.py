@@ -14,9 +14,11 @@ from pyspark.sql import functions as F
 #   coropletas_total_clas           {n_pleta, freq, nivel, vmin, q3, vmax}
 #   coropletas_secuencia_clas       {date, n_pleta, freq, nivel, vmin, q3, vmax}
 #   coropletas_secuencia_tipo_clas  {date, primary_type, n_pleta, freq, nivel, vmin, q3, vmax}
+#   coropletas_anual_clas           {anio, n_pleta, freq, nivel, vmin, q3, vmax}
 #
 # n_pleta = "q_r", celda hexagonal de radio hex_m metros.
-# date    = "YYYY-MM".
+# date    = "YYYY-MM"; anio = "YYYY", solo anios con los 12 meses (el actual suele
+#           estar a medias y se veria artificialmente bajo).
 # freq    = crimenes de la celda (en toda la historia / ese mes / ese mes y tipo).
 # vmin, q3, vmax = minimo, tercer cuartil y maximo de freq en todo el dataset
 #                  (en el de tipos, por tipo): la escala es fija entre meses.
@@ -68,15 +70,22 @@ if __name__ == "__main__":
     crimenes = crimenes.withColumn("n_pleta", F.concat_ws("_", q.cast("int"), r.cast("int"))) \
         .cache()
 
-    # (carpeta de salida, columnas que definen cada fila, grupo con escala propia)
+    crimenes = crimenes.withColumn("anio", F.substring("date", 1, 4))
+    anios_completos = crimenes.groupBy("anio").agg(F.countDistinct("date").alias("meses")) \
+        .where(F.col("meses") == 12).select("anio")
+
+    # (carpeta de salida, crimenes a usar, columnas que definen cada fila,
+    #  grupo con escala propia)
     salidas = [
-        ("coropletas_total_clas", ["n_pleta"], []),
-        ("coropletas_secuencia_clas", ["date", "n_pleta"], []),
-        ("coropletas_secuencia_tipo_clas", ["date", "primary_type", "n_pleta"], ["primary_type"]),
+        ("coropletas_total_clas", crimenes, ["n_pleta"], []),
+        ("coropletas_secuencia_clas", crimenes, ["date", "n_pleta"], []),
+        ("coropletas_secuencia_tipo_clas", crimenes, ["date", "primary_type", "n_pleta"],
+         ["primary_type"]),
+        ("coropletas_anual_clas", crimenes.join(anios_completos, "anio"), ["anio", "n_pleta"], []),
     ]
-    for nombre, claves, grupo in salidas:
+    for nombre, datos, claves, grupo in salidas:
         escala = Window.partitionBy(*grupo)
-        conteo = crimenes.groupBy(*claves).agg(F.count("*").alias("freq")) \
+        conteo = datos.groupBy(*claves).agg(F.count("*").alias("freq")) \
             .withColumn("vmin", F.min("freq").over(escala)) \
             .withColumn("q3", F.expr("percentile(freq, 0.75)").over(escala)) \
             .withColumn("vmax", F.max("freq").over(escala))
