@@ -7,7 +7,7 @@ El proyecto analiza los ~8,5 millones de crímenes registrados en Chicago desde 
 - **Dónde:** qué zonas de la ciudad concentran más crímenes, en mapas de hexágonos de 500 m.
 - **De qué tipo:** cómo cambia esa distribución por tipo de crimen, mes y año.
 
-Todo el cálculo pesado corre en el clúster. En la computadora local solo se dibujan los mapas a partir de resultados ya agregados.
+Todo el cálculo pesado corre en el clúster. En la computadora local se dibujan los gráficos y mapas a partir de resultados ya agregados.
 
 ## Flujo del proyecto
 
@@ -16,7 +16,8 @@ Todo el cálculo pesado corre en el clúster. En la computadora local solo se di
 | 1. Datos | `descargar_chicago_parquet.py` | Fuera del clúster | API del portal de datos | Parquet, cargado en HDFS en `parquet/` |
 | 2. Proporción mensual | `PropMensual.py` | Clúster (Spark) | Parquet | `resultados/prop-mensual-v1/` |
 | 3. Coropletas | `Coropletas.py` | Clúster (Spark) | Parquet | `resultados/coropletas-v1/` |
-| 4. Mapas | `VisualizarCoropletas.py` | Local | CSV de la etapa 3 | PNG en `coropletas-png/` |
+| 4. Gráfico mensual | [VisualizarPropMensual.py](VisualizarPropMensual.py) | Local | Texto de tuplas de la etapa 2 (`prop-mensual-location-full.txt`) | Una imagen con un panel por lugar y nombre automático |
+| 5. Mapas | `VisualizarCoropletas.py` | Local | CSV de la etapa 3 | PNG en `coropletas-png/` |
 
 Las etapas 2 y 3 son independientes: ambas leen el mismo Parquet y se ejecutan igual. Solo usan Spark, sin APIs ni librerías externas, porque el clúster puede no permitir instalarlas.
 
@@ -149,7 +150,80 @@ scp -P 220 -r \
 
 Los `*.csv` están en `.gitignore`, así que no se suben al repositorio aunque queden dentro de `proyecto/`.
 
-## 5. Mapas
+## 5. Gráfico: proporción mensual por tipo de lugar (`prop-mensual-v1`)
+
+[VisualizarPropMensual.py](VisualizarPropMensual.py) lee `prop-mensual-location-full.txt` y genera
+una sola imagen en `proyecto/`, con nombre automático y un subgráfico por tipo
+de lugar en una cuadrícula y una leyenda compartida de años. Cada panel tiene
+los meses en el eje X, la proporción en el eje Y y una línea por año.
+Se ejecuta localmente, sin Spark.
+Desde la raíz del repositorio:
+
+```bash
+python -m pip install matplotlib
+python proyecto/VisualizarPropMensual.py
+python proyecto/VisualizarPropMensual.py --top 4
+python proyecto/VisualizarPropMensual.py --top 12 --columnas 3 --salida proyecto/prop-mensual-top12.png
+python proyecto/VisualizarPropMensual.py --anios 2020 2023 2025 --top 6 --columnas 3
+python proyecto/VisualizarPropMensual.py --lugares STREET RESIDENCE "PARK PROPERTY" --salida proyecto/lugares-seleccionados.png
+```
+
+Si se usa el archivo descargado en el paso 4.2, llamado `prop-mensual-v1.txt`,
+se pasa su ruta como primer argumento (este ejemplo supone que está en la raíz
+del repositorio):
+
+```bash
+python proyecto/VisualizarPropMensual.py prop-mensual-v1.txt --top 4
+```
+
+| Argumento | Función | Valor predeterminado |
+|---|---|---|
+| `entrada` (posicional, opcional) | Ruta al texto de tuplas generado por `PropMensual.py` | `prop-mensual-location-full.txt`, junto al script |
+| `--top N` | Selecciona los N lugares con más reportes acumulados en los años elegidos | Todos los lugares |
+| `--anios YYYY ...` (alias `--anio`) | Años que se comparan y se usan para calcular el top; separados por espacios | Todos los años disponibles |
+| `--lugares NOMBRE ...` | Selección por nombre exacto; reemplaza `--top`. Usar comillas si hay espacios | Sin selección manual |
+| `--columnas N` | Número de columnas de la cuadrícula | 4, o la cantidad de lugares si es menor |
+| `--salida RUTA` | Archivo de salida PNG, PDF o SVG | PNG con nombre automático junto al script |
+| `--mostrar` | Abre la figura en una ventana además de guardarla | Solo guardar |
+
+Por defecto incluye los 218 lugares del archivo actual en una sola imagen de
+cuatro columnas (55 filas) y compara todos los años
+disponibles para cada lugar, entre 2001 y 2026. `--anios` permite elegir años;
+`--lugares` permite elegir lugares por nombre exacto; `--top N` limita a los N
+lugares con más reportes acumulados en los años seleccionados.
+
+El top se ordena por la suma de los totales anuales de cada lugar, de mayor a
+menor; en caso de empate, por nombre en orden alfabético. Los paneles siguen
+ese orden de izquierda a derecha y de arriba abajo. La selección usa cantidades
+de reportes, no proporciones. Al usar `--top N`, la figura incluye el subtítulo
+«Top N lugares con más reportes acumulados en los años seleccionados», con la
+cantidad efectiva de lugares mostrados. Con `--lugares`, los paneles siguen
+el orden indicado y no se muestra ese subtítulo.
+
+Los colores y estilos de cada año se mantienen entre gráficos. Cada línea usa la proporción
+ya calculada: reportes del mes / total de ese año para el mismo lugar.
+Por eso cada línea suma 100 % a lo largo del año; las líneas no suman 100 %
+entre sí en cada mes. Los meses sin reportes se completan con cero si ese mes
+está registrado para otros lugares del año. Los meses ausentes del año completo
+se dejan sin dibujar y se incluye una nota sobre la cobertura incompleta.
+2026 se identifica como parcial porque solo tiene diez meses registrados.
+Si un lugar no tiene datos para un año, se omite esa línea.
+
+Se puede pasar otro archivo de entrada como primer argumento y agregar
+`--mostrar` para abrir la figura en una ventana. `--salida` indica el archivo
+de destino (PNG, PDF o SVG) y `--columnas` controla la distribución de paneles.
+Para una figura más compacta, se puede usar `--top 12` o seleccionar lugares.
+
+Sin `--salida`, el nombre refleja la selección, los años y las columnas. Por
+ejemplo, `--top 4` genera `prop-mensual-v1_top4_anios2001-2026_cols4.png` con
+los datos actuales; `--top 4 --anios 2020 2023 2025 --columnas 2` genera
+`prop-mensual-v1_top4_anios2020_2023_2025_cols2.png`. Sin límite de lugares,
+se usa `todos218`. Con `--lugares`, se incluye la cantidad y un identificador
+de la selección para distinguir conjuntos del mismo tamaño. Repetir la misma
+selección y distribución reemplaza su imagen; `--salida` tiene prioridad sobre
+el nombre automático.
+
+## 6. Mapas
 
 `VisualizarCoropletas.py` corre en la computadora local, lee la carpeta `coropletas-v1/` y guarda los PNG en `coropletas-png/`. No calcula nada: los colores ya vienen en la columna `nivel`. Las dependencias están en `requirements.txt`. `contextily` dibuja el mapa de la ciudad bajo los hexágonos y necesita conexión a internet; sin él, los mapas se generan sin fondo.
 
