@@ -14,9 +14,9 @@ Todo el cálculo pesado corre en el clúster. En la computadora local se dibujan
 | Etapa | Script | Dónde corre | Entrada | Salida |
 |---|---|---|---|---|
 | 1. Datos | `descargar_chicago_parquet.py` | Fuera del clúster | API del portal de datos | Parquet, cargado en HDFS en `parquet/` |
-| 2. Proporción mensual | `PropMensual.py` | Clúster (Spark) | Parquet | `resultados/prop-mensual-v1/` |
-| 3. Coropletas | `Coropletas.py` | Clúster (Spark) | Parquet | `resultados/coropletas-v1/` |
-| 4. Gráfico mensual | [VisualizarPropMensual.py](VisualizarPropMensual.py) | Local | Texto de tuplas de la etapa 2 (`prop-mensual-location-full.txt`) | Una imagen con un panel por lugar y nombre automático |
+| 2. Estacionalidad | [EstacionalidadMensual.py](EstacionalidadMensual.py) | Clúster (Spark) | Parquet | `resultados/estacionalidad/` |
+| 3. Coropletas | `Coropletas.py` | Clúster (Spark) | Parquet | `resultados/coropletas/` |
+| 4. Gráficos de estacionalidad | [VisualizarEstacionalidad.py](VisualizarEstacionalidad.py) | Local | `indices-mensuales.txt` y `cv-anual.txt` | Figuras de índices y CV por lugar |
 | 5. Mapas | `VisualizarCoropletas.py` | Local | CSV de la etapa 3 | PNG en `coropletas-png/` |
 
 Las etapas 2 y 3 son independientes: ambas leen el mismo Parquet y se ejecutan igual. Solo usan Spark, sin APIs ni librerías externas, porque el clúster puede no permitir instalarlas.
@@ -32,9 +32,10 @@ Rutas usadas en todo el documento:
 
 ## Qué calcula cada análisis
 
-### Proporción mensual por tipo de lugar (`PropMensual.py`)
+### Estacionalidad mensual por tipo de lugar
 
-Para cada año, mes y tipo de lugar (`location_description`) cuenta los crímenes del mes y los divide por el total anual de ese mismo tipo de lugar. La salida es un texto con tuplas `(año, mes, lugar, conteo mensual, total anual del lugar, proporción)`.
+`EstacionalidadMensual.py` calcula el índice mensual ajustado por días y el CV
+anual por lugar. Excluye 2026. Las fórmulas y columnas se describen en la sección 5.
 
 ### Coropletas hexagonales (`Coropletas.py`)
 
@@ -63,20 +64,20 @@ ssh -p 220 uhadoop@cm.dcc.uchile.cl
 
 ```bash
 cd /data/2026/uhadoop/projects/grupo7
-screen -S grupo7
+screen -S estacionalidad
 ```
 
 ## 2. Ejecución de los análisis
 
 `spark-submit` ejecuta cada script en el clúster: lee el Parquet de HDFS y escribe el resultado en HDFS. La carpeta de salida no debe existir previamente. Si se cambia su nombre, hay que actualizarlo también en los pasos siguientes.
 
-Proporción mensual:
+Estacionalidad mensual:
 
 ```bash
 spark-submit --master spark://cluster-01:7077 \
-  /data/2026/uhadoop/projects/grupo7/PropMensual.py \
+  /data/2026/uhadoop/projects/grupo7/EstacionalidadMensual.py \
   hdfs://cm:9000/uhadoop2026/projects/grupo7/parquet/ \
-  hdfs://cm:9000/uhadoop2026/projects/grupo7/resultados/prop-mensual-v1/
+  hdfs://cm:9000/uhadoop2026/projects/grupo7/resultados/estacionalidad/
 ```
 
 Coropletas. El tercer argumento es el radio del hexágono en metros (por defecto 500):
@@ -85,7 +86,7 @@ Coropletas. El tercer argumento es el radio del hexágono en metros (por defecto
 spark-submit --master spark://cluster-01:7077 \
   /data/2026/uhadoop/projects/grupo7/Coropletas.py \
   hdfs://cm:9000/uhadoop2026/projects/grupo7/parquet/ \
-  hdfs://cm:9000/uhadoop2026/projects/grupo7/resultados/coropletas-v1/ \
+  hdfs://cm:9000/uhadoop2026/projects/grupo7/resultados/coropletas/ \
   500
 ```
 
@@ -97,11 +98,11 @@ spark-submit --master spark://cluster-01:7077 \
 hdfs dfs -ls -R /uhadoop2026/projects/grupo7/resultados/
 ```
 
-`hdfs dfs -cat` muestra el comienzo de un resultado en la terminal. Por ejemplo, la proporción mensual y las coropletas totales:
+`hdfs dfs -cat` muestra el comienzo de un resultado en la terminal. Por ejemplo, los índices mensuales y las coropletas totales:
 
 ```bash
-hdfs dfs -cat '/uhadoop2026/projects/grupo7/resultados/prop-mensual-v1/part-*' | head
-hdfs dfs -cat '/uhadoop2026/projects/grupo7/resultados/coropletas-v1/coropletas_total_clas/part-*' | head
+hdfs dfs -cat '/uhadoop2026/projects/grupo7/resultados/estacionalidad/indices_mensuales/part-*' | head
+hdfs dfs -cat '/uhadoop2026/projects/grupo7/resultados/coropletas/coropletas_total_clas/part-*' | head
 ```
 
 ## 4. Descarga de resultados
@@ -110,27 +111,30 @@ La descarga tiene dos pasos: primero se copian los resultados de HDFS al disco d
 
 ### 4.1 De HDFS al disco del servidor
 
-La proporción mensual se escribe en varias partes, así que `hdfs dfs -getmerge` las une en un solo archivo de texto:
+Los índices y el CV se escriben en varias partes. Se reúne cada salida en un archivo:
 
 ```bash
 hdfs dfs -getmerge \
-  /uhadoop2026/projects/grupo7/resultados/prop-mensual-v1/ \
-  /data/2026/uhadoop/projects/grupo7/prop-mensual-v1.txt
+  /uhadoop2026/projects/grupo7/resultados/estacionalidad/indices_mensuales/ \
+  /data/2026/uhadoop/projects/grupo7/indices-mensuales.txt
+hdfs dfs -getmerge \
+  /uhadoop2026/projects/grupo7/resultados/estacionalidad/cv_anual/ \
+  /data/2026/uhadoop/projects/grupo7/cv-anual.txt
 ```
 
 Cada dataset de coropletas ya es un único `part-*.csv` con encabezado, así que basta con `hdfs dfs -get`. El ciclo `for` copia los cuatro con su nombre final:
 
 ```bash
 cd /data/2026/uhadoop/projects/grupo7
-mkdir -p coropletas-v1
+mkdir -p coropletas
 
 for d in coropletas_total_clas coropletas_secuencia_clas coropletas_secuencia_tipo_clas coropletas_anual_clas; do
   hdfs dfs -get \
-    "/uhadoop2026/projects/grupo7/resultados/coropletas-v1/$d/part-*.csv" \
-    coropletas-v1/$d.csv
+    "/uhadoop2026/projects/grupo7/resultados/coropletas/$d/part-*.csv" \
+    coropletas/$d.csv
 done
 
-ls -lh coropletas-v1/
+ls -lh coropletas/
 ```
 
 Con los datos completos pesan aproximadamente 35 KB (total), 9 MB (mensual), 93 MB (mensual por tipo) y 0,8 MB (anual).
@@ -141,95 +145,133 @@ Desde una terminal local, `scp` descarga los resultados a la carpeta actual (`.`
 
 ```bash
 scp -P 220 \
-  uhadoop@cm.dcc.uchile.cl:/data/2026/uhadoop/projects/grupo7/prop-mensual-v1.txt \
+  uhadoop@cm.dcc.uchile.cl:/data/2026/uhadoop/projects/grupo7/indices-mensuales.txt \
+  uhadoop@cm.dcc.uchile.cl:/data/2026/uhadoop/projects/grupo7/cv-anual.txt \
   .
 scp -P 220 -r \
-  uhadoop@cm.dcc.uchile.cl:/data/2026/uhadoop/projects/grupo7/coropletas-v1 \
+  uhadoop@cm.dcc.uchile.cl:/data/2026/uhadoop/projects/grupo7/coropletas \
   .
 ```
 
 Los `*.csv` están en `.gitignore`, así que no se suben al repositorio aunque queden dentro de `proyecto/`.
 
-## 5. Gráfico: proporción mensual por tipo de lugar (`prop-mensual-v1`)
+## 5. Índice mensual y coeficiente de variación
 
-[VisualizarPropMensual.py](VisualizarPropMensual.py) lee `prop-mensual-location-full.txt` y genera
-una sola imagen en `proyecto/`, con nombre automático y un subgráfico por tipo
-de lugar en una cuadrícula y una leyenda compartida de años. Cada panel tiene
-los meses en el eje X, la proporción en el eje Y y una línea por año.
-Se ejecuta localmente, sin Spark.
-Desde la raíz del repositorio:
+[EstacionalidadMensual.py](EstacionalidadMensual.py) conserva el estilo de
+los ejemplos del laboratorio 5: lee el Parquet, trabaja con RDDs usando
+`map`, `filter`, `reduceByKey`, `flatMap`, `leftOuterJoin` y `aggregateByKey`,
+y escribe tuplas con `saveAsTextFile`. Toda la lógica está dentro de
+`if __name__ == "__main__"`, sin funciones auxiliares, con transformaciones
+mediante lambdas y exactamente dos argumentos: `<filein> <fileout>`.
+Solo requiere PySpark y la biblioteca estándar de Python. Es independiente
+del script de visualización.
+
+Para cada año y tipo de lugar, calcula:
+
+\[
+I_m = 100\frac{N_m/d_m}{N_a/d_a}
+\]
+
+Aquí, `N_m` y `N_a` son los reportes del mes y del año del mismo lugar;
+`d_m` y `d_a` son sus días calendario. Se consideran los años bisiestos.
+Un índice de 120 significa una tasa diaria 20 % superior a la media diaria
+anual; 80 significa 20 % inferior. La referencia es 100, no 0.
+
+El resumen anual entrega dos versiones del CV:
+
+\[
+\mu = \frac{1}{12}\sum_{m=1}^{12}x_m,\qquad
+\sigma = \sqrt{\frac{1}{12}\sum_{m=1}^{12}(x_m-\mu)^2},\qquad
+CV = 100\frac{\sigma}{\mu}.
+\]
+
+| Indicador | Valores mensuales `x_m` | Interpretación |
+|---|---|---|
+| `cv_reportes_pct` | Conteo `N_m` | Variación de los conteos; incluye el efecto de la duración del mes |
+| `cv_tasas_pct` | Tasa diaria `N_m / d_m` | Variación mensual ajustada por la duración del mes |
+
+Se usa desviación **poblacional**, dividiendo por 12, porque se describen los
+doce meses del año. La media de tasas del CV da igual peso a cada mes; no es
+necesariamente igual a la tasa anual `N_a / d_a`, que pondera por días.
+Dentro de un mismo año y lugar, el CV de las tasas también equivale al CV
+de los índices, porque estos multiplican todas las tasas por la misma constante.
+
+El script completa con cero los meses sin reportes de un lugar y excluye
+únicamente 2026 directamente en `cleanLines`, antes de calcular
+los conteos mensuales y anuales. El filtro es fijo:
+no depende de la fecha de ejecución ni verifica automáticamente la cobertura
+de los demás años. Se supone que los años restantes están completos. Los
+cambios de nombre de las categorías tampoco se unifican automáticamente.
+
+Ejemplo de ejecución; copiar primero el script al servidor
+en `/data/2026/uhadoop/projects/grupo7/`:
+
+```bash
+spark-submit --master spark://cluster-01:7077 \
+  /data/2026/uhadoop/projects/grupo7/EstacionalidadMensual.py \
+  hdfs://cm:9000/uhadoop2026/projects/grupo7/parquet/ \
+  hdfs://cm:9000/uhadoop2026/projects/grupo7/resultados/estacionalidad/
+```
+
+Las carpetas de salida no deben existir previamente. Produce dos resultados
+sin encabezado:
+
+| Subcarpeta | Campos de cada tupla, en orden |
+|---|---|
+| `indices_mensuales` | `(anio, mes, lugar, reportes_mes, dias_mes, reportes_anio, dias_anio, tasa_diaria_mes, tasa_diaria_anio, indice)` |
+| `cv_anual` | `(anio, lugar, meses, reportes_anio, media_reportes_mes, sigma_reportes_mes, cv_reportes_pct, media_tasas_diarias, sigma_tasas_diarias, cv_tasas_pct)` |
+
+Para revisar y reunir las partes en el servidor:
+
+```bash
+hdfs dfs -cat '/uhadoop2026/projects/grupo7/resultados/estacionalidad/cv_anual/part-*' | head
+hdfs dfs -getmerge /uhadoop2026/projects/grupo7/resultados/estacionalidad/indices_mensuales/ /data/2026/uhadoop/projects/grupo7/indices-mensuales.txt
+hdfs dfs -getmerge /uhadoop2026/projects/grupo7/resultados/estacionalidad/cv_anual/ /data/2026/uhadoop/projects/grupo7/cv-anual.txt
+```
+
+Para contrastar observaciones del gráfico, revisar si los meses señalados
+mantienen índices por encima o por debajo de 100 en varios años y comparar
+`cv_tasas_pct` entre lugares y años junto con sus volúmenes de reportes.
+Un CV mayor indica más dispersión, pero no identifica los meses del máximo
+ni demuestra por sí solo una estacionalidad recurrente o significancia
+estadística. Los lugares con pocos reportes pueden tener CV altos por
+fluctuaciones de conteos pequeños. No se usa un umbral universal de CV.
+
+### Visualizar los indicadores localmente
+
+`VisualizarEstacionalidad.py` lee `indices-mensuales.txt` y `cv-anual.txt`
+desde la carpeta del script. Requiere únicamente `matplotlib` y la biblioteca
+estándar de Python. No requiere Spark ni otros scripts de visualización.
 
 ```bash
 python -m pip install matplotlib
-python proyecto/VisualizarPropMensual.py
-python proyecto/VisualizarPropMensual.py --top 4
-python proyecto/VisualizarPropMensual.py --top 12 --columnas 3 --salida proyecto/prop-mensual-top12.png
-python proyecto/VisualizarPropMensual.py --anios 2020 2023 2025 --top 6 --columnas 3
-python proyecto/VisualizarPropMensual.py --lugares STREET RESIDENCE "PARK PROPERTY" --salida proyecto/lugares-seleccionados.png
+python proyecto/VisualizarEstacionalidad.py --top 4 --columnas 2
+python proyecto/VisualizarEstacionalidad.py --anios 2020 2023 2025 --lugares STREET RESIDENCE
 ```
 
-Si se usa el archivo descargado en el paso 4.2, llamado `prop-mensual-v1.txt`,
-se pasa su ruta como primer argumento (este ejemplo supone que está en la raíz
-del repositorio):
+Genera dos imágenes, cada una con un panel por lugar:
 
-```bash
-python proyecto/VisualizarPropMensual.py prop-mensual-v1.txt --top 4
-```
+- `estacionalidad-indices_...png`: meses en X, índice en Y y líneas por año.
+  La línea negra en 100 representa la tasa diaria anual del lugar.
+- `estacionalidad-cv_...png`: años en X y CV en Y, con una línea para tasas
+  diarias y otra para conteos mensuales. Cada punto resume los doce meses.
 
-| Argumento | Función | Valor predeterminado |
-|---|---|---|
-| `entrada` (posicional, opcional) | Ruta al texto de tuplas generado por `PropMensual.py` | `prop-mensual-location-full.txt`, junto al script |
-| `--top N` | Selecciona los N lugares con más reportes acumulados en los años elegidos | Todos los lugares |
-| `--anios YYYY ...` (alias `--anio`) | Años que se comparan y se usan para calcular el top; separados por espacios | Todos los años disponibles |
-| `--lugares NOMBRE ...` | Selección por nombre exacto; reemplaza `--top`. Usar comillas si hay espacios | Sin selección manual |
-| `--columnas N` | Número de columnas de la cuadrícula | 4, o la cantidad de lugares si es menor |
-| `--salida RUTA` | Archivo de salida PNG, PDF o SVG | PNG con nombre automático junto al script |
-| `--mostrar` | Abre la figura en una ventana además de guardarla | Solo guardar |
-
-Por defecto incluye los 218 lugares del archivo actual en una sola imagen de
-cuatro columnas (55 filas) y compara todos los años
-disponibles para cada lugar, entre 2001 y 2026. `--anios` permite elegir años;
-`--lugares` permite elegir lugares por nombre exacto; `--top N` limita a los N
-lugares con más reportes acumulados en los años seleccionados.
-
-El top se ordena por la suma de los totales anuales de cada lugar, de mayor a
-menor; en caso de empate, por nombre en orden alfabético. Los paneles siguen
-ese orden de izquierda a derecha y de arriba abajo. La selección usa cantidades
-de reportes, no proporciones. Al usar `--top N`, la figura incluye el subtítulo
-«Top N lugares con más reportes acumulados en los años seleccionados», con la
-cantidad efectiva de lugares mostrados. Con `--lugares`, los paneles siguen
-el orden indicado y no se muestra ese subtítulo.
-
-Los colores y estilos de cada año se mantienen entre gráficos. Cada línea usa la proporción
-ya calculada: reportes del mes / total de ese año para el mismo lugar.
-Por eso cada línea suma 100 % a lo largo del año; las líneas no suman 100 %
-entre sí en cada mes. Los meses sin reportes se completan con cero si ese mes
-está registrado para otros lugares del año. Los meses ausentes del año completo
-se dejan sin dibujar y se incluye una nota sobre la cobertura incompleta.
-2026 se identifica como parcial porque solo tiene diez meses registrados.
-Si un lugar no tiene datos para un año, se omite esa línea.
-
-Se puede pasar otro archivo de entrada como primer argumento y agregar
-`--mostrar` para abrir la figura en una ventana. `--salida` indica el archivo
-de destino (PNG, PDF o SVG) y `--columnas` controla la distribución de paneles.
-Para una figura más compacta, se puede usar `--top 12` o seleccionar lugares.
-
-Sin `--salida`, el nombre refleja la selección, los años y las columnas. Por
-ejemplo, `--top 4` genera `prop-mensual-v1_top4_anios2001-2026_cols4.png` con
-los datos actuales; `--top 4 --anios 2020 2023 2025 --columnas 2` genera
-`prop-mensual-v1_top4_anios2020_2023_2025_cols2.png`. Sin límite de lugares,
-se usa `todos218`. Con `--lugares`, se incluye la cantidad y un identificador
-de la selección para distinguir conjuntos del mismo tamaño. Repetir la misma
-selección y distribución reemplaza su imagen; `--salida` tiene prioridad sobre
-el nombre automático.
+`--top N` selecciona por reportes acumulados en los años elegidos y lo indica
+en el subtítulo. Sin `--top` ni `--lugares`, se incluyen todos los lugares.
+`--columnas` controla la cuadrícula; `--salida` indica una **carpeta** para ambas
+imágenes; `--mostrar` también abre las figuras. Los nombres automáticos incluyen
+la selección, los años y las columnas, sin sufijos de versión.
+Para otros archivos se utilizan `--indices RUTA` y `--cv RUTA`.
+Los archivos deben tener los mismos años, lugares y totales, con doce índices
+mensuales por grupo. Un año sin datos para un lugar se omite, no se trata como cero.
 
 ## 6. Mapas
 
-`VisualizarCoropletas.py` corre en la computadora local, lee la carpeta `coropletas-v1/` y guarda los PNG en `coropletas-png/`. No calcula nada: los colores ya vienen en la columna `nivel`. Las dependencias están en `requirements.txt`. `contextily` dibuja el mapa de la ciudad bajo los hexágonos y necesita conexión a internet; sin él, los mapas se generan sin fondo.
+`VisualizarCoropletas.py` corre en la computadora local, lee la carpeta `coropletas/` y guarda los PNG en `coropletas-png/`. No calcula nada: los colores ya vienen en la columna `nivel`. Las dependencias están en `requirements.txt`. `contextily` dibuja el mapa de la ciudad bajo los hexágonos y necesita conexión a internet; sin él, los mapas se generan sin fondo.
 
 ```bash
 pip install -r requirements.txt
-python VisualizarCoropletas.py coropletas-v1 coropletas-png
+python VisualizarCoropletas.py coropletas coropletas-png
 ```
 
 | Archivo | Contenido | Opción |
