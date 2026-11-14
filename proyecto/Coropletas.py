@@ -17,8 +17,8 @@ from pyspark.sql import functions as F
 #   coropletas_anual_clas           {anio, n_pleta, freq, nivel, vmin, q3, vmax}
 #
 # n_pleta = "q_r", celda hexagonal de radio hex_m metros.
-# date    = "YYYY-MM"; anio = "YYYY", solo anios con los 12 meses (el actual suele
-#           estar a medias y se veria artificialmente bajo).
+# date    = "YYYY-MM"; anio = "YYYY". Se excluye 2026: el anio en curso esta a medias
+#           y sus meses y su total se verian bajos.
 # freq    = crimenes de la celda (en toda la historia / ese mes / ese mes y tipo).
 # vmin, q3, vmax = minimo, tercer cuartil y maximo de freq en todo el dataset
 #                  (en el de tipos, por tipo): la escala es fija entre meses.
@@ -43,21 +43,32 @@ if __name__ == "__main__":
     dirout = sys.argv[2]
     hex_m = float(sys.argv[3]) if len(sys.argv) == 4 else 500.0
 
-    spark = SparkSession.builder.appName("Coropletas").getOrCreate()
+    spark = SparkSession.builder.appName("Coropletas") \
+        .config("spark.sql.optimizer.canChangeCachedPlanOutputPartitioning", "true") \
+        .getOrCreate()
 
+    # (fecha YYYY-MM valida, sin 2026, con tipo de lugar),
+    # exigen ademas coordenadas dentro de Chicago y tipo de crimen.
     crimenes = spark.read.parquet(filein).select(
             F.substring("date", 1, 7).alias("date"),
             F.trim("primary_type").alias("primary_type"),
+            F.trim("location_description").alias("lugar"),
             F.col("latitude").cast("double").alias("lat"),
             F.col("longitude").cast("double").alias("lon")) \
-        .where(F.col("lat").between(LAT_MIN, LAT_MAX)
+        .where(F.col("date").rlike("^[0-9]{4}-(0[1-9]|1[0-2])$")
+               & (F.substring("date", 1, 4) != "2026")
+               & (F.col("lugar") != "")
+               & F.col("lat").between(LAT_MIN, LAT_MAX)
                & F.col("lon").between(LON_MIN, LON_MAX)
-               & (F.length("date") == 7)
                & (F.col("primary_type") != ""))
+
+    # >>>   Nota este es un calculo conocido, pero ante la inseretidumbre de
+    #       poder usar la libreria externa preferi usar el formato canonico
 
     # Celda hexagonal (pointy-top): (lat, lon) -> metros -> coordenadas axiales
     # fraccionarias (qf, rf, sf), redondeadas con "cube rounding" (se corrige la
     # coordenada con mayor error de redondeo para que q + r + s = 0).
+
     x = (F.col("lon") - LON0) * M_POR_GRADO_LON
     y = (F.col("lat") - LAT0) * M_POR_GRADO_LAT
     qf = (SQRT3 / 3 * x - y / 3) / hex_m
@@ -67,25 +78,30 @@ if __name__ == "__main__":
     dq, dr, ds = F.abs(q - qf), F.abs(r - rf), F.abs(s - sf)
     q = F.when((dq > dr) & (dq > ds), -r - s).otherwise(q)
     r = F.when((dq > dr) & (dq > ds), r).when(dr > ds, -q - s).otherwise(r)
-    crimenes = crimenes.withColumn("n_pleta", F.concat_ws("_", q.cast("int"), r.cast("int"))) \
-        .cache()
+    crimenes = crimenes.select("date", "primary_type",
+                               F.concat_ws("_", q.cast("int"), r.cast("int")).alias("n_pleta"))
 
-    crimenes = crimenes.withColumn("anio", F.substring("date", 1, 4))
-    anios_completos = crimenes.groupBy("anio").agg(F.countDistinct("date").alias("meses")) \
-        .where(F.col("meses") == 12).select("anio")
+    # Los crimenes se recorren una sola vez, en el conteo mas detallado (mes, tipo y
+    # celda). Los demas conteos suman sobre el anterior, cada vez mas pequeno.
+    por_tipo = crimenes.groupBy("date", "primary_type", "n_pleta") \
+        .agg(F.count("*").alias("freq")).cache()
+    por_mes = por_tipo.groupBy("date", "n_pleta").agg(F.sum("freq").alias("freq")).cache()
+    total = por_mes.groupBy("n_pleta").agg(F.sum("freq").alias("freq"))
 
-    # (carpeta de salida, crimenes a usar, columnas que definen cada fila,
-    #  grupo con escala propia)
+    por_anio = por_mes.withColumn("anio", F.substring("date", 1, 4)) \
+        .groupBy("anio", "n_pleta").agg(F.sum("freq").alias("freq"))
+
+    # (carpeta de salida, conteo, columnas que definen cada fila, grupo con escala propia)
     salidas = [
-        ("coropletas_total_clas", crimenes, ["n_pleta"], []),
-        ("coropletas_secuencia_clas", crimenes, ["date", "n_pleta"], []),
-        ("coropletas_secuencia_tipo_clas", crimenes, ["date", "primary_type", "n_pleta"],
+        ("coropletas_total_clas", total, ["n_pleta"], []),
+        ("coropletas_secuencia_clas", por_mes, ["date", "n_pleta"], []),
+        ("coropletas_secuencia_tipo_clas", por_tipo, ["date", "primary_type", "n_pleta"],
          ["primary_type"]),
-        ("coropletas_anual_clas", crimenes.join(anios_completos, "anio"), ["anio", "n_pleta"], []),
+        ("coropletas_anual_clas", por_anio, ["anio", "n_pleta"], []),
     ]
-    for nombre, datos, claves, grupo in salidas:
+    for nombre, conteo, claves, grupo in salidas:
         escala = Window.partitionBy(*grupo)
-        conteo = datos.groupBy(*claves).agg(F.count("*").alias("freq")) \
+        conteo = conteo \
             .withColumn("vmin", F.min("freq").over(escala)) \
             .withColumn("q3", F.expr("percentile(freq, 0.75)").over(escala)) \
             .withColumn("vmax", F.max("freq").over(escala))
@@ -95,7 +111,6 @@ if __name__ == "__main__":
                  .when(F.col("q3") > F.col("vmin"), 0.5 * (l - lmin) / (lq3 - lmin)) \
                  .otherwise(0.5)
 
-        # Las salidas son pequenas: coalesce(1) deja un solo CSV con un solo encabezado.
         conteo.select(claves + ["freq", F.round(nivel, 4).alias("nivel"), "vmin", "q3", "vmax"]) \
             .coalesce(1).write.option("header", True).csv(os.path.join(dirout, nombre))
 
